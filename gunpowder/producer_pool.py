@@ -121,6 +121,7 @@ class ProducerPool(object):
 
         result = None
         while True:
+            logger.debug("Worker with PID %d looping again" % os.getpid())
 
             if os.getppid() != parent_pid:
                 logger.debug("worker %d: watch-dog died, stopping"%os.getpid())
@@ -132,7 +133,8 @@ class ProducerPool(object):
                     result = target()
                 except Exception as e:
                     result = e
-                    traceback.print_exc()
+                    logger.error("Error in worker with PID %d" % os.getpid())
+                    logger.error(e, exc_info=True)
                     # don't stop on normal exceptions -- place them in result queue 
                     # and let them be handled by caller
                 except:
@@ -150,4 +152,6 @@ class ProducerPool(object):
         os._exit(1)
 
     def __all_workers_alive(self, workers):
+        logger.debug("WORKER PIDS: %s" % [worker.pid for worker in workers])
+        logger.debug("WORKER ALIVE: %s" % [worker.is_alive() for worker in workers])
         return all([ worker.is_alive() for worker in workers ])
