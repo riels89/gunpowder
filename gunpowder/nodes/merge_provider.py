@@ -13,9 +13,19 @@ class MergeProvider(BatchProvider):
     will create a provider that combines the arrays and points offered by
     ``a``, ``b``, and ``c``. Array and point keys of ``a``, ``b``, and ``c`` should be
     the disjoint.
+
+    Args:
+        
+        dup_strat (`str`):
+            
+            How to handle any duplicate providers. Default is `error` and will
+            throw and error if there are duplicates (how the original implementation 
+            worked). Can also use `first`, this will keep the first instance that a 
+            provider gives.
     '''
-    def __init__(self):
+    def __init__(self, dup_strat="error"):
         self.key_to_provider = {}
+        self.dup_strat = dup_strat
 
     def setup(self):
         assert len(self.get_upstream_providers()) > 0, "at least one batch provider needs to be added to the MergeProvider"
@@ -25,9 +35,14 @@ class MergeProvider(BatchProvider):
                         "providers with different keys."
         for provider in self.get_upstream_providers():
             for key, spec in provider.spec.items():
-                assert self.spec is None or key not in self.spec, error_message.format(key)
-                self.provides(key, spec)
-                self.key_to_provider[key] = provider
+                if self.dup_strat == "error":
+                    assert self.spec is None or key not in self.spec, error_message.format(key)
+                    self.provides(key, spec)
+                    self.key_to_provider[key] = provider
+                elif self.dup_strat == "first":
+                    if key not in self.key_to_provider.keys():
+                        self.provides(key, spec)
+                        self.key_to_provider[key] = provider
 
     def provide(self, request):
 
