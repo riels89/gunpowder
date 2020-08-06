@@ -1,7 +1,7 @@
 import math
 import logging
 from random import random, randint, choice
-
+import time
 import numpy as np
 from scipy.spatial import KDTree
 from skimage.transform import integral_image, integrate
@@ -96,7 +96,7 @@ class RandomLocation(BatchFilter):
                 mask_integral_dtype = np.uint32
             if mask_data.size < 2**16:
                 mask_integral_dtype = np.uint16
-            logger.debug("chose %s as integral array dtype", mask_integral_dtype)
+            logger.debug(f"chose {mask_integral_dtype} as integral array dtype")
 
             self.mask_integral = np.array(mask_data > 0, dtype=mask_integral_dtype)
             self.mask_integral = integral_image(self.mask_integral)
@@ -108,7 +108,7 @@ class RandomLocation(BatchFilter):
             graph_spec = self.upstream_spec.graph_specs[self.ensure_nonempty]
 
 
-            logger.info("requesting all %s points...", self.ensure_nonempty)
+            logger.info(f"requesting all %s points... {self.ensure_nonempty}")
 
             nonempty_request = BatchRequest({self.ensure_nonempty: graph_spec})
             nonempty_batch = upstream.request_batch(nonempty_request)
@@ -116,8 +116,10 @@ class RandomLocation(BatchFilter):
             self.points = KDTree([
                 v.location
                 for v in nonempty_batch[self.ensure_nonempty].nodes])
-
-            logger.info("retrieved %d points", len(self.points.data))
+            
+            num_points = len(self.points.data)
+            logger.info("retrieved %d points", num_points)
+            assert num_points > 0, "Found no points in upstream provider" 
 
         # clear bounding boxes of all provided arrays and points --
         # RandomLocation does not have limits (offsets are ignored)
@@ -128,13 +130,17 @@ class RandomLocation(BatchFilter):
 
     def prepare(self, request):
 
-        logger.debug("request: %s", request.array_specs)
-        logger.debug("my spec: %s", self.spec)
+        logger.debug("request: %s"% request.array_specs)
+        logger.debug("my spec: %s"% self.spec)
 
         shift_roi = self.__get_possible_shifts(request)
+        if shift_roi.empty():
+            return request
 
+        logger.debug(shift_roi)
+        logger.debug("found shifts")
         if request.array_specs.keys():
-
+            
             lcm_voxel_size = self.spec.get_lcm_voxel_size(
                 request.array_specs.keys())
             shift_roi = shift_roi.snap_to_grid(lcm_voxel_size, mode='shrink')
@@ -142,19 +148,18 @@ class RandomLocation(BatchFilter):
             logger.debug("lcm voxel size: %s", lcm_voxel_size)
 
             logger.debug(
-                "restricting random locations to multiples of voxel size %s",
-                lcm_voxel_size)
+                "restricting random locations to multiples of voxel size %s", lcm_voxel_size)
 
         else:
 
             lcm_voxel_size = Coordinate((1,)*shift_roi.dims())
             lcm_shift_roi = shift_roi
-
+        logger.debug("selecting random shift..")
         random_shift = self.__select_random_shift(
             request,
             lcm_shift_roi,
             lcm_voxel_size)
-
+        logger.debug("chosen random shift")
         self.random_shift = random_shift
         self.__shift_request(request, random_shift)
 
@@ -162,15 +167,16 @@ class RandomLocation(BatchFilter):
 
     def process(self, batch, request):
 
-        # reset ROIs to request
-        for (array_key, spec) in request.array_specs.items():
-            batch.arrays[array_key].spec.roi = spec.roi
-        for (graph_key, spec) in request.graph_specs.items():
-            batch.graphs[graph_key].spec.roi = spec.roi
+        if self.random_shift is not None:
+            # reset ROIs to request
+            for (array_key, spec) in request.array_specs.items():
+                batch.arrays[array_key].spec.roi = spec.roi
+            for (graph_key, spec) in request.graph_specs.items():
+                batch.graphs[graph_key].spec.roi = spec.roi
 
-        # change shift point locations to lie within roi
-        for graph_key in request.graph_specs.keys():
-            batch.graphs[graph_key].shift(-self.random_shift)
+            # change shift point locations to lie within roi
+            for graph_key in request.graph_specs.keys():
+                batch.graphs[graph_key].shift(-self.random_shift)
 
     def accepts(self, request):
         '''Should return True if the randomly chosen location is acceptable
@@ -198,6 +204,9 @@ class RandomLocation(BatchFilter):
                 (0,)*request_roi.dims(),
                 -request_roi.get_shape()
             )
+            logger.debug(f"request_roi: {request_roi}")
+            logger.debug(f"provided_roi: {provided_roi}")
+            logger.debug(f"{key}, {shift_roi}")
 
             if total_shift_roi is None:
                 total_shift_roi = shift_roi
@@ -343,7 +352,7 @@ class RandomLocation(BatchFilter):
             #         8       +9
             #                 ==
             #                 request.shape-1
-
+            logger.debug(f"lcm_shift_roi: {lcm_shift_roi}")
             # pick a random point
             point = choice(self.points.data)
 
@@ -384,9 +393,11 @@ class RandomLocation(BatchFilter):
                 lcm_location - lcm_roi_begin - lcm_roi_shape +
                 Coordinate((1,)*len(lcm_location))
             )
+            logger.debug(f"lcm_shift_roi_begin: {lcm_shift_roi_begin}")
             lcm_shift_roi_shape = (
-                lcm_roi_shape + lower_boundary_correction
-            )
+                lcm_roi_shape
+                )
+            logger.debug(f"lcm_shift_roi_shape: {lcm_shift_roi_shape}")
             lcm_point_shift_roi = Roi(lcm_shift_roi_begin, lcm_shift_roi_shape)
             logger.debug("lcm point shift roi: %s", lcm_point_shift_roi)
 
@@ -403,7 +414,8 @@ class RandomLocation(BatchFilter):
             random_shift = self.__select_random_location(
                 lcm_point_shift_roi,
                 lcm_voxel_size)
-            logger.debug("random shift: %s", random_shift)
+            logger.debug(f"random shift: {random_shift}")
+            logger.debug(f"shited roi: {request_points_roi.shift(random_shift)}")
 
             # count all points inside the shifted ROI
             points = self.__get_points_in_roi(
@@ -412,6 +424,7 @@ class RandomLocation(BatchFilter):
                 "Requested batch to contain point %s, but got points "
                 "%s"%(point, points))
             num_points = len(points)
+            logger.debug(f"accepted {num_points} number of points")
 
             # accept this shift with v=1/num_points
             #
@@ -424,7 +437,7 @@ class RandomLocation(BatchFilter):
 
         # select a random point inside ROI
         random_shift = Coordinate(
-            randint(int(begin), int(end))
+            randint(int(begin), int(end) - 1)
             for begin, end in zip(lcm_shift_roi.get_begin(), lcm_shift_roi.get_end()))
 
         random_shift *= lcm_voxel_size
